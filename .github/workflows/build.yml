@@ -168,21 +168,9 @@ jobs:
 
               ext_xml="stage/extensions/$ane/META-INF/ANE/extension.xml"
               if [ -f "$ext_xml" ]; then
-                  python3 <<PYEOF
-import re
-path = "$ext_xml"
-with open(path) as f: data = f.read()
-# Replace any <platform name="iPhone-ARM"> ... </platform> block
-# with one that has only an empty <applicationDeployment/>
-pattern = re.compile(
-    r'<platform\s+name="iPhone-ARM">.*?</platform>',
-    re.DOTALL
-)
-new_block = '<platform name="iPhone-ARM"><applicationDeployment/></platform>'
-data, n = pattern.subn(new_block, data)
-print(f"  patched {n} iPhone-ARM block(s) in {path}")
-with open(path, 'w') as f: f.write(data)
-PYEOF
+                  perl -i -0pe 's|<platform\s+name="iPhone-ARM">.*?</platform>|<platform name="iPhone-ARM"><applicationDeployment/></platform>|gs' "$ext_xml"
+                  echo "  patched iPhone-ARM block in $ext_xml"
+              fi
           done
 
           cp -r src/assets                  stage/
