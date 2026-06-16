@@ -128,8 +128,6 @@ jobs:
           sed -i.bak -E "s|application/[0-9]+\.[0-9]+|application/$SDK_VER|" stage/application.xml
 
           # Filter out Android-only ANEs (no iPhone-ARM platform implementation).
-          # Their AS3 class references in the SWF will be unresolved at runtime,
-          # which is fine as long as those code paths aren't hit on iOS.
           ANDROID_ONLY_ANES=(
               "androidx.core"
               "com.jetbrains.kotlin"
@@ -149,7 +147,11 @@ jobs:
 
           cp "src/slither ios.swf"          stage/
 
-          # Copy only iOS-compatible ANEs to stage/extensions
+          # Copy only iOS-compatible ANEs and patch each one:
+          # the .a static library is missing (it was statically linked at original
+          # build time and stripped from the IPA bundle). So we rewrite each
+          # iPhone-ARM platform to use empty applicationDeployment, which makes
+          # adt treat the ANE as pure-AS3 (library.swf only, no native code).
           mkdir -p stage/extensions
           for ane_dir in src/extensions/*/; do
               ane=$(basename "$ane_dir")
@@ -157,16 +159,35 @@ jobs:
               for skipane in "${ANDROID_ONLY_ANES[@]}"; do
                   [ "$ane" = "$skipane" ] && skip=true
               done
-              if [ "$skip" = "false" ]; then
-                  echo "Including ANE: $ane"
-                  cp -r "$ane_dir" stage/extensions/
-              else
+              if [ "$skip" = "true" ]; then
                   echo "Skipping Android-only ANE: $ane"
+                  continue
               fi
+              echo "Patching iOS ANE: $ane"
+              cp -r "$ane_dir" stage/extensions/
+
+              ext_xml="stage/extensions/$ane/META-INF/ANE/extension.xml"
+              if [ -f "$ext_xml" ]; then
+                  python3 <<PYEOF
+import re
+path = "$ext_xml"
+with open(path) as f: data = f.read()
+# Replace any <platform name="iPhone-ARM"> ... </platform> block
+# with one that has only an empty <applicationDeployment/>
+pattern = re.compile(
+    r'<platform\s+name="iPhone-ARM">.*?</platform>',
+    re.DOTALL
+)
+new_block = '<platform name="iPhone-ARM"><applicationDeployment/></platform>'
+data, n = pattern.subn(new_block, data)
+print(f"  patched {n} iPhone-ARM block(s) in {path}")
+with open(path, 'w') as f: f.write(data)
+PYEOF
           done
 
           cp -r src/assets                  stage/
           cp icons/*                        stage/icons/ 2>/dev/null || true
+          echo "=== stage/ ==="
           ls -la stage/
           echo "=== extensions ==="
           ls stage/extensions/
