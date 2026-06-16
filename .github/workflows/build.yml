@@ -1,0 +1,166 @@
+name: Build iOS IPA
+
+# Bootstrap workflow — assumes a Release tagged `bootstrap` exists with:
+#   - slither-ios-mod.zip   (project files)
+#   - AIRSDK_MacOS.zip      (Harman AIR SDK)
+#
+# No need to commit anything else to the repo. Just create the release,
+# upload the two zips, and trigger this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'AIR build target'
+        required: true
+        default: 'ipa-ad-hoc'
+        type: choice
+        options:
+          - ipa-test
+          - ipa-ad-hoc
+          - ipa-debug
+      release_tag:
+        description: 'Release tag holding the zips'
+        required: true
+        default: 'bootstrap'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download project + SDK from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -e
+          echo "Downloading from release: $TAG"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              -p "slither-ios-mod.zip" \
+              -p "AIRSDK*"
+          ls -lh
+
+      - name: Extract project
+        run: |
+          unzip -q slither-ios-mod.zip
+          if [ -d slither-ios-mod ]; then
+            shopt -s dotglob
+            mv slither-ios-mod/* .
+            rmdir slither-ios-mod
+          fi
+          ls -la
+
+      - name: Set up Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install Harman AIR SDK
+        run: |
+          set -e
+          SDK_FILE=$(ls AIRSDK* | head -1)
+          echo "SDK file: $SDK_FILE"
+
+          if [[ "$SDK_FILE" == *.pkg ]]; then
+            echo "=== Installing .pkg ==="
+            sudo installer -pkg "$SDK_FILE" -target / -verbose
+            # Common install locations for Harman AIR SDK pkg
+            for cand in \
+                "/Library/Frameworks/Adobe AIR.framework/Versions/1.0/Resources/Adobe AIR SDK" \
+                "/Applications/Adobe AIR SDK" \
+                "/Library/AdobeAIRSDK" \
+                "/usr/local/AIRSDK" \
+                "/Applications/Harman/AIRSDK"; do
+              if [ -d "$cand" ]; then
+                SDK_ROOT="$cand"; break
+              fi
+            done
+            if [ -z "$SDK_ROOT" ]; then
+              echo "Searching filesystem for adt..."
+              ADT_PATH=$(sudo find / -name adt -type f 2>/dev/null | grep -i air | head -1)
+              if [ -n "$ADT_PATH" ]; then
+                SDK_ROOT=$(dirname $(dirname "$ADT_PATH"))
+              fi
+            fi
+          elif [[ "$SDK_FILE" == *.zip ]]; then
+            echo "=== Extracting .zip ==="
+            mkdir -p $HOME/airsdk
+            unzip -q "$SDK_FILE" -d $HOME/airsdk
+            ADT_PATH=$(find $HOME/airsdk -name adt -type f | head -1)
+            SDK_ROOT=$(dirname $(dirname "$ADT_PATH"))
+          else
+            echo "ERROR: unknown SDK file type: $SDK_FILE"
+            exit 1
+          fi
+
+          if [ -z "$SDK_ROOT" ] || [ ! -f "$SDK_ROOT/bin/adt" ]; then
+            echo "ERROR: adt not found"
+            echo "Searched dirs:"
+            ls -la /Applications/ /Library/ /usr/local/ 2>/dev/null | grep -i air
+            exit 1
+          fi
+
+          echo "AIR_HOME: $SDK_ROOT"
+          chmod +x "$SDK_ROOT/bin/adt"
+          echo "AIR_HOME=$SDK_ROOT" >> $GITHUB_ENV
+          echo "$SDK_ROOT/bin" >> $GITHUB_PATH
+
+      - name: Verify adt
+        run: |
+          which adt
+          adt -version
+
+      - name: Create dummy signing certificate
+        run: |
+          adt -certificate -cn "SlitherMod" -ou "Mod" -o "Mod" -c US 2048-RSA dummy.p12 password
+
+      - name: Stage app payload
+        run: |
+          mkdir -p stage/icons
+          cp build/application.xml          stage/
+          cp "src/slither ios.swf"          stage/
+          cp -r src/extensions              stage/
+          cp -r src/assets                  stage/
+          cp icons/*                        stage/icons/ 2>/dev/null || true
+          ls -la stage/
+
+      - name: Package iPA
+        run: |
+          cd stage
+          TARGET="${{ github.event.inputs.target }}"
+          echo "=== Building with target: $TARGET ==="
+          adt -package \
+              -target "$TARGET" \
+              -storetype PKCS12 \
+              -keystore ../dummy.p12 \
+              -storepass password \
+              ../slither-mod-signed.ipa \
+              application.xml \
+              -extdir extensions \
+              "slither ios.swf" \
+              assets \
+              icons 2>&1 | tee ../adt.log
+
+      - name: Strip signature
+        run: |
+          bash scripts/strip-signature.sh slither-mod-signed.ipa slither-mod-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-mod-ipa
+          path: slither-mod-unsigned.ipa
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            adt.log
+            stage/application.xml
+          retention-days: 7
