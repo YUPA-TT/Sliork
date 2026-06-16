@@ -121,18 +121,55 @@ jobs:
         run: |
           mkdir -p stage/icons
           cp build/application.xml          stage/
+
           # Coerce AIR namespace to match installed SDK version
-          # (extract major.minor from adt -version output)
           SDK_VER=$(adt -version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
           echo "Detected SDK version: $SDK_VER"
           sed -i.bak -E "s|application/[0-9]+\.[0-9]+|application/$SDK_VER|" stage/application.xml
-          echo "=== application.xml namespace line ==="
-          grep "xmlns" stage/application.xml
+
+          # Filter out Android-only ANEs (no iPhone-ARM platform implementation).
+          # Their AS3 class references in the SWF will be unresolved at runtime,
+          # which is fine as long as those code paths aren't hit on iOS.
+          ANDROID_ONLY_ANES=(
+              "androidx.core"
+              "com.jetbrains.kotlin"
+              "com.google.android.play"
+              "com.distriqt.playservices.Base"
+              "com.distriqt.Share"
+          )
+
+          # Strip from application.xml extension list
+          for ane in "${ANDROID_ONLY_ANES[@]}"; do
+              esc=$(echo "$ane" | sed 's/\./\\./g')
+              sed -i.bak -E "/<extensionID>$esc<\/extensionID>/d" stage/application.xml
+          done
+
+          echo "=== application.xml final ==="
+          cat stage/application.xml
+
           cp "src/slither ios.swf"          stage/
-          cp -r src/extensions              stage/
+
+          # Copy only iOS-compatible ANEs to stage/extensions
+          mkdir -p stage/extensions
+          for ane_dir in src/extensions/*/; do
+              ane=$(basename "$ane_dir")
+              skip=false
+              for skipane in "${ANDROID_ONLY_ANES[@]}"; do
+                  [ "$ane" = "$skipane" ] && skip=true
+              done
+              if [ "$skip" = "false" ]; then
+                  echo "Including ANE: $ane"
+                  cp -r "$ane_dir" stage/extensions/
+              else
+                  echo "Skipping Android-only ANE: $ane"
+              fi
+          done
+
           cp -r src/assets                  stage/
           cp icons/*                        stage/icons/ 2>/dev/null || true
           ls -la stage/
+          echo "=== extensions ==="
+          ls stage/extensions/
 
       - name: Package iPA
         run: |
